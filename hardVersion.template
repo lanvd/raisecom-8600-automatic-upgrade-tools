@@ -1,0 +1,8 @@
+Value hardVersion (\S+)
+
+Start
+  ^Hardware Version\: ${hardVersion} -> Record
+
+
+
+

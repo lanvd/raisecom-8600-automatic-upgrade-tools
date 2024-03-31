@@ -1,0 +1,8 @@
+Value cpldVersion (\S+)
+
+Start
+  ^Firmware 2 Type CPLD Version ${cpldVersion}\( -> Record
+
+
+
+

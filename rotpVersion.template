@@ -1,0 +1,8 @@
+Value rotpVersion (\S+)
+
+Start
+  ^ROTP Version: ${rotpVersion} -> Record
+
+
+
+

@@ -1,0 +1,8 @@
+Value softVersion (\S+)
+
+Start
+  ^Software Version: ${softVersion}\( -> Record
+
+
+
+

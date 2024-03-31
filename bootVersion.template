@@ -1,0 +1,8 @@
+Value bootromVersion (\S+)
+
+Start
+  ^Bootrom Version\: ${bootromVersion} -> Record
+
+
+
+

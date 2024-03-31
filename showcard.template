@@ -1,0 +1,10 @@
+Value Shelf (\W+\d+)
+Value Slot ([\W+|\d]\d+)
+Value AddedType (\S+)
+Value PowerType (\S+)
+Value PowerName (\S+)
+Value State (\S+)
+Value Poll (\S+)
+
+Start
+  ^${Shelf}\s+${Slot}\s+${AddedType}\s+${PowerType}\s+${PowerName}\s+${State}\s+${Poll} -> Record

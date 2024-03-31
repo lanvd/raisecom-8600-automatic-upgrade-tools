@@ -1,0 +1,6 @@
+Value prodname (\S+)
+Value ver (\S+)
+
+Start
+  ^    Product Name: ${prodname} -> Continue
+  ^    Product Ver: ${ver}  -> Record

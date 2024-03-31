@@ -1,0 +1,8 @@
+Value fpgaVersion (\S+)
+
+Start
+  ^Firmware 1 Type (\S+) Version ${fpgaVersion}\( -> Record
+
+
+
+
