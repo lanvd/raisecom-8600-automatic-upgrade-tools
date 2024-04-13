@@ -22,7 +22,13 @@ import queue
 from concurrent.futures import ThreadPoolExecutor
 import threading
 
-logging.basicConfig(filename='uptklog.log', level=logging.DEBUG,
+folder_path = './log'
+
+
+if not os.path.exists(folder_path):
+    os.makedirs(folder_path)
+
+logging.basicConfig(filename='log\\uptklog.log', level=logging.DEBUG,
                     format='%(asctime)s %(filename)s[line:%(lineno)d] %(message)s', datefmt='%Y-%m-%d %X')
 
 
@@ -86,6 +92,7 @@ class msgobj():
         self.cardsoftwareRes = ""
         self.cardfpgaRes = ""
         self.cardcpldRes = ""
+        self.resetstatus = ""
         
 
     def bootromRes(self,resultText):
@@ -94,8 +101,12 @@ class msgobj():
         self.cardsoftwareRes = resultText
     def fpgaRes(self,resultText):
         self.cardfpgaRes = resultText
+    def fpgaResApp(self,resultText):
+        self.cardfpgaRes = "{},{}".format(self.cardfpgaRes,resultText)
     def cpldRes(self,resultText):
         self.cardcpldRes = resultText
+    def setresetstatus(self,resetstatus):
+        self.resetstatus = resetstatus
     def finnalRes(self,resultText):
         self.cardbootromRes = resultText
         self.cardsoftwareRes = resultText
@@ -130,7 +141,18 @@ def getrowdata(kname, rowdata):
         if len(str(getvalue).strip()) == 0:
             return None
     return getvalue
+''' 
+以主9备10举例。先传备用主控（10槽）的相关版本（boot+system等），再传主用主控（9槽）的相关版本（boot+system等）。
+如果有重启，等两个主控版本都传完后，先重启备用主控（10槽），等备用主控（10槽）起来后（show card显示备用主控为working状态），
+进到config下show ha state，到状态为6情况下，做ha倒换；ha倒换后，重新一次登入设备，再重启此时的备用主控（9槽）
+，show car直至主控（9槽）状态为working，然后进config下show ha state
 
+
+预校验表格是备用主控会写在主用主控前面行，升级按表格一行行处理：
+1.处理备用主控先上传，然后reset 。
+2.轮到主用主控的时候上传版本，然后ha 倒换，然后再重启这时候切换为备用的主控
+ 
+'''
 
 def task(rowData):
     global g_model,msgqueue
@@ -141,12 +163,13 @@ def task(rowData):
         'username': str(rowData['用户名']),
         'password': str(rowData['密码']),
         'secret': str(rowData['密码']),
-        'session_log': 'netmiko.log',
+        'session_log': 'log\\netmiko.log',
         'port': int(rowData['端口号']),
     }
+    g_model = rowData['上传完是否重启Y/N']
     print('begin send queue')
     outmsg = msgobj(text,**rowData)
-    outmsg.outtext('开始升级')
+
     print('end send queue')
     needreboot = True
     uploadsucess = False
@@ -196,67 +219,39 @@ def task(rowData):
                 #text.insert('end', '\n {}'.format('升级文件名空,不用升级'))
                 pass
             else:
-                if backInfo is not None:
-                    ##有主控备板 需要ha
-                    if backInfo.get('Slot') == masterSoltId:
-                        print('已经切换好了')
-                        outmsg.outtext('主控板已经切换好了')
-                        pass
-                    else:
-                        print('主控板开始ha切换备板')
-                        outmsg.outtext('主控板开始ha切换备板')
-                        print(dev_info)
-                        net_connect, ha_result = haswitch(masterSoltId, net_connect, **dev_info)
-
-
-                        if ha_result == False:
-                            msgtext = 'ha切换失败请检查 {}'.format(rowData)
-                            outmsg.outtext('主ha切换失败请检查')
-                            outmsg.finnalRes('连接设备失败')
-                            msgqueue.put(outmsg)
-                            return rowData
-                        else:
-                            outmsg.outtext('ha 切换成功')
-                    ##做ha 切换
-                    ## 表已经切换好了
-                    pass
-                else:
-                    onemaster = True
-                    ##只有一张主控板
-                    downloadbootrom = ' download    bootrom  ftp '
 
                 if getrowdata('升级bootrom文件名', rowData) is None:
                     print('升级bootrom文件名为空不升级')
                 else:
                     print('开始升级 bootrom')
                     outmsg.setupfilename(rowData.get('升级bootrom文件名'))
-                    outmsg.outtext('开始升级 ')
+                    outmsg.bootromRes('开始升级 bootrom')
                     #text.insert('end', '\n {}  '.format(outmsg.outmsg()))
-                    if backInfo is None:
-                        ###
-                        print('只有单板主控')
-                        downloadbootrom = ' download    bootrom  ftp '
-                        ftpcmdret = net_connect.send_command(downloadbootrom, expect_string=r':')
-                        # slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
-                        # downret = net_connect.send_command(slotidcmd, expect_string=r':')
+                    outmsg.outtext('开始升级 bootrom')
+                    if g_tftp:
+                        downloadbootrom = ' download    bootrom  tftp '
                     else:
-                        print('有主备主控')
-                        downloadbootrom = ' download  svcfile  bootrom  ftp '
-                        ftpcmdret = net_connect.send_command(downloadbootrom, expect_string=r':')
-                        print(ftpcmdret)
-                        slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
-                        ftpcmdret += net_connect.send_command(slotidcmd, expect_string=r':')
+                        downloadbootrom = ' download    bootrom  ftp '
 
+
+
+                    ftpcmdret = net_connect.send_command(downloadbootrom, expect_string=r':')
+                    print(ftpcmdret)
                     ipcmd = '{}'.format(rowData['ftpip'])
                     print(ftpcmdret)
                     ftpcmdret += net_connect.send_command(ipcmd, expect_string=r':')
                     print(ftpcmdret)
-                    ftpcmd = '{}'.format(rowData['ftpuser'])
-                    ftpcmdret += net_connect.send_command(ftpcmd, expect_string=r':')
-                    print(ftpcmdret)
-                    ftpcmd = '{}'.format(rowData['ftppasswd'])
-                    ftpcmdret = net_connect.send_command(ftpcmd, expect_string=r':')
-                    print(ftpcmdret)
+                    if g_tftp:
+                        ftpcmd = "69"
+                        ftpcmdret += net_connect.send_command(ftpcmd, read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
+                    else:
+                        ftpcmd = '{}'.format(rowData['ftpuser'])
+                        ftpcmdret += net_connect.send_command(ftpcmd, expect_string=r':')
+                        print(ftpcmdret)
+                        ftpcmd = '{}'.format(rowData['ftppasswd'])
+                        ftpcmdret = net_connect.send_command(ftpcmd, expect_string=r':')
+                        print(ftpcmdret)
                     ftpcmd = '{}'.format(rowData.get('升级bootrom文件名'))
                     print('bootrom file={}'.format(ftpcmd))
                     ftpcmdret = net_connect.send_command(ftpcmd, expect_string=r':')
@@ -266,61 +261,15 @@ def task(rowData):
                     if 'Copy file successfully!' in ftpcmdret:
                         resulttext = '{}上传版本成功 '.format(rowData.get('升级bootrom文件名'))
                         print('上传版本成功')
-                        outmsg.outtext('上传版本成功')
-                        outmsg.bootromRes('上传版本成功')
-                        resetFlag = True
-                        # resetflag = 1
-                        if g_model == "YES":
-                            if 2 == 1:
-                                pass
-                            else:
-                                resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                                print('reset cmd={}'.format(resetcmd))
-                                resetret = net_connect.send_command(resetcmd)
-                                #text.insert('end', '\n {}'.format('开始reset板卡'))
-                                outmsg.outtext('{}'.format('开始reset板卡'))
-                                time.sleep(10)
-                                print('after reset card get slot state')
-                                net_connectpack = [net_connect]
-                                resetCard = getslotstate(rowData.get('solt id'),  dev_info , net_connectpack)
-                                net_connect = net_connectpack[0]
-                                print('get resetCard={}'.format(resetCard))
-                                resetcount = 0
-                                outmsg.outtext('开始等待板卡reset启动')
-                                while resetCard.get('State') != 'working' and resetcount < 360:
-                                    time.sleep(3)
-                                    resetcount = resetcount + 1
-                                    net_connectpack = [net_connect]
-                                    resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                    net_connect = net_connectpack[0]
-                                    print('not card state <> working waiting... 3seconds')
-                                print('get working state ={}'.format(resetCard.get('State')))
-                                if resetCard.get('State') != 'working':
-                                    resulttext = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                                    print(resulttext)
-                                    outmsg.outtext('状态不是working没有起来需要检查')
-                                else:
-                                    resulttext = '上传版本成功，重启板卡成功'
-                                    print('上传版本成功，重启板卡成功')
-                                    outmsg.outtext(resulttext)
-                                outmsg.outtext('等待板卡ha状态为6',card=True)
-                                resetcount = 0
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                time.sleep(10)
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                while hastate != '6' and resetcount < 360:
-                                    time.sleep(3)
-                                    resetcount = resetcount + 1
-                                    hastate = gethastate(outmsg, net_connect, **dev_info)
-                                    print('ha state <> 6  now hastate ={}'.format(hastate))
-                                resulttext = ' 升级成功重启成功 ' + '板卡HA状态={}'.format(hastate)
-                                outmsg.outtext(resulttext)
-                        else:
-                            outmsg.outtext('上传版本成功,不自动重启')
+                        outmsg.outtext('上传版本成功 不自动重启')
+                        outmsg.bootromRes('上传版本成功,不自动重启')
+
+
                     else:
                         resulttext = 'bootrom 上传版本失败'
                         print('上传版本失败')
                         outmsg.outtext(resulttext)
+                        outmsg.bootromRes(resulttext)
 
 
 
@@ -331,220 +280,85 @@ def task(rowData):
                     print('升级Software {}'.format(rowData.get('升级Software文件名')))
                     #text.insert('end', '\n {}'.format('升级Software {}'.format(rowData.get('升级Software文件名'))))
                     outmsg.outtext('升级Software ')
-                    if backInfo is None:
-                        ###
-                        print('只有单板主控')
+
+                    if g_tftp:
+                        downloadsystemboot = ' download   system-boot  tftp '
+                    else:
                         downloadsystemboot = ' download   system-boot  ftp '
 
-                        ftpcmdret = net_connect.send_command(downloadsystemboot, expect_string=r':')
-                    else:
-                        print('有主备主控')
-                        downloadsystemboot = ' download  svcfile  system-boot  ftp '
-                        ftpcmdret = net_connect.send_command(downloadsystemboot,read_timeout=30, expect_string=r':')
-                        slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
-                        ftpcmdret += net_connect.send_command(slotidcmd,read_timeout=30, expect_string=r':')
-                    print(downloadsystemboot)
-                    print(ftpcmdret)
 
-
+                    ftpcmdret = net_connect.send_command(downloadsystemboot,read_timeout=30, expect_string=r':')
                     ftpcmd = '{}'.format(rowData['ftpip'])
                     ftpcmdret += net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftpuser'])
-                    ftpcmdret += net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftppasswd'])
-                    ftpcmdret += net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    print(ftpcmdret)
+                    if g_tftp:
+                        ftpcmd="69"
+                        ftpcmdret += net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
+                    else:
+                        ftpcmd = '{}'.format(rowData['ftpuser'])
+                        ftpcmdret += net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftppasswd'])
+                        ftpcmdret += net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
                     ftpcmd = '{}'.format(rowData.get('升级Software文件名'))
                     ftpcmdret += net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
                     ftpcmd = 'y'
                     print(ftpcmdret)
-                    ftpcmdret += net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
+                    ftpcmdret += net_connect.send_command(ftpcmd, read_timeout=5000, expect_string=r'#')
                     print(ftpcmdret)
                     if 'Copy file successfully!' in ftpcmdret:
-                        resulttext = '上传版本成功'
+                        resulttext = '上传版本成功 不自动重启'
                         outmsg.outtext(resulttext)
-                        resetFlag = True
-                        #text.insert('end', '\n {} {}'.format(rowData.get('升级Software文件名'), resulttext))
-                        if g_model == "YES":
-                            if 1 == 2:
-                                pass
-                                ##一张主控直接reboot
-                                rebootcmd = 'reboot'
-                                print('reboot ....')
-                                rebootret = net_connect.send_command(rebootcmd, expect_string=r'\)')
-                                print('reboot return={}'.format(rebootret))
-                                time.sleep(2)
-                                rebootret = net_connect.send_command('Y', expect_string=r'#')
 
-                                print('rebootret=={}'.format(rebootret))
-                                time.sleep(10)
-                                net_connect = reconnect(360, 10, dev_info)
-                                if net_connect is not None:
-                                    alertinfo = '主控板重启成功 '
-                                    #text.insert('end', '\n {}'.format(alertinfo))
-                                    outmsg.outtext(alertinfo)
-                                else:
-                                    alertinfo = '主控板重启成功失败请人工检查'
-                                    outmsg.outtext(alertinfo)
 
-                            else:
-                                resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                                print('reset cmd={}'.format(resetcmd))
-                                resetret = net_connect.send_command(resetcmd)
-                                time.sleep(10)
-                                resulttext = '开始reset板卡'
-                                #text.insert('end', '\n {}'.format(resulttext))
-                                outmsg.outtext(resulttext)
-                                print('after reset card get slot state')
-                                net_connectpack = [net_connect]
-                                resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                net_connect = net_connectpack[0]
-                                print('get resetCard={}'.format(resetCard))
-                                resetcount = 0
-                                while resetCard.get('State') != 'working' and resetcount < 360:
-                                    time.sleep(3)
-                                    resetcount = resetcount + 1
-                                    net_connectpack = [net_connect]
-                                    resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                    net_connect = net_connectpack[0]
-                                    print('not card state <> working waiting... 3seconds')
-                                print('get working state ={}'.format(resetCard.get('State')))
-                                if resetCard.get('State') != 'working':
-                                    resulttext = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                                    print(resulttext)
-                                    outmsg.outtext('状态不是working没有起来需要检查')
-                                else:
-                                    resulttext = '上传版本成功，重启板卡成功'
-                                    print('上传版本成功，重启板卡成功')
-                                    outmsg.outtext(resulttext)
-                                resetcount = 0
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                time.sleep(10)
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                outmsg.outtext('等待板块卡ha状态为6')
-                                while hastate != '6' and resetcount < 360:
-                                    time.sleep(3)
-                                    resetcount = resetcount + 1
-                                    hastate = gethastate(outmsg, net_connect, **dev_info)
-                                    print('ha state <> 6  now hastate ={}'.format(hastate))
-                                resulttext = resulttext + '板卡HA状态={}'.format(hastate)
-                        else:
-                            outmsg.outtext('不自动重启')
+                        outmsg.softwareRes(resulttext)
                     else:
                         resulttext = '上传版本失败'
                         print('上传版本失败')
-                    showtext = '升级Software{} {} '.format(rowData.get('升级Software文件名'), resulttext)
-                    outmsg.outtext(resulttext)
+                        outmsg.softwareRes(resulttext)
+                        outmsg.outtext(resulttext)
                 if getrowdata('升级FPGA文件名', rowData) is None:
                     print('升级FPGA文件名为空不升级')
                 else:
                     print('开始升级 fpga')
                     outmsg.setupfilename(rowData.get('升级FPGA文件名'))
                     #text.insert('end', '\n {} {}'.format('开始升级 fpga',rowData.get('升级FPGA文件名')))
-                    if backInfo is None:
-                        ###
-                        print('只有单板主控')
-                        downloadfpga = ' download   fpga  ftp '
-                        ftpcmdret = net_connect.send_command(downloadfpga, expect_string=r':')
+                    outmsg.outtext('开始升级 fpga')
+                    if g_tftp:
+                        downloadfpga = ' download   fpga  tftp '
                     else:
-                        print('有主备主控')
-                        downloadfpga = ' download  svcfile  fpga  ftp '
-                        print(downloadfpga)
-                        ftpcmdret = net_connect.send_command(downloadfpga, expect_string=r':')
-                        slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
+                        downloadfpga = ' download   fpga  ftp '
 
-                        ftpcmdret += net_connect.send_command(slotidcmd, expect_string=r':')
+                    print(downloadfpga)
+                    ftpcmdret = net_connect.send_command(downloadfpga, expect_string=r':')
+
 
                     ipcmd = '{}'.format(rowData['ftpip'])
                     ftpcmdret = net_connect.send_command(ipcmd, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftpuser'])
-                    ftpcmdret = net_connect.send_command(ftpcmd, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftppasswd'])
-                    ftpcmdret = net_connect.send_command(ftpcmd, expect_string=r':')
+                    if g_tftp:
+                        ftpcmd = "69"
+                        ftpcmdret += net_connect.send_command(ftpcmd, read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
+                    else:
+                        ftpcmd = '{}'.format(rowData['ftpuser'])
+                        ftpcmdret = net_connect.send_command(ftpcmd, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftppasswd'])
+                        ftpcmdret = net_connect.send_command(ftpcmd, expect_string=r':')
                     ftpcmd = '{}'.format(rowData.get('升级FPGA文件名'))
                     net_connect.send_command(ftpcmd, expect_string=r':')
                     ftpcmd = 'y'
                     ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
                     print(ftpcmdret)
                     if 'Copy file successfully!' in ftpcmdret:
-                        resulttext = '上传版本成功'
+                        resulttext = '上传版本成功，不自动重启'
                         resetFlag = True
                         print('上传版本成功')
-                        outmsg.outtext(' 上传版本成功')
-                        if g_model == "YES":
-                            if 1 == 2:
-                                pass
-                                ##一张主控直接reboot
-                                rebootcmd = 'reboot'
-                                print('reboot ....')
-
-                                outmsg.outtext("开始重启板卡请等待", card=True)
-                                rebootret = net_connect.send_command(rebootcmd, expect_string=r'\)')
-                                print('reboot return={}'.format(rebootret))
-                                time.sleep(2)
-                                rebootret = net_connect.send_command('Y', expect_string=r'#')
-
-                                print('rebootret=={}'.format(rebootret))
-                                time.sleep(10)
-                                net_connect = reconnect(360, 10, dev_info)
-                                if net_connect is not None:
-                                    alertinfo = '板卡重启成功 '
-                                    #text.insert('end', '\n {}'.format(alertinfo))
-                                    outmsg.outtext(alertinfo)
-                                else:
-                                    alertinfo = '板卡重启成功失败请人工检查'
-                                    outmsg.outtext(alertinfo)
-
-                            else:
-                                resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                                print('reset cmd={}'.format(resetcmd))
-                                resetret = net_connect.send_command(resetcmd)
-                                resulttext = '开始reset板卡'
-
-                                outmsg.outtext("开始重启板卡请等待", card=True)
-                                time.sleep(10)
-                                print('after reset card get slot state')
-
-                                net_connectpack = [net_connect]
-                                resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                net_connect = net_connectpack[0]
-                                print('get resetCard={}'.format(resetCard))
-                                resetcount = 0
-                                while resetCard.get('State') != 'working' and resetcount < 360:
-                                    time.sleep(3)
-                                    resetcount = resetcount + 1
-
-                                    net_connectpack = [net_connect]
-                                    resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                    net_connect = net_connectpack[0]
-                                    print('not card state <> working waiting... 3seconds')
-                                print('get working state ={}'.format(resetCard.get('State')))
-                                if resetCard.get('State') != 'working':
-                                    resulttext = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                                    print(resulttext)
-                                else:
-                                    resulttext = '上传版本成功，重启板卡成功'
-                                    print('上传版本成功，重启板卡成功')
-
-                                resetcount = 0
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                time.sleep(10)
-                                outmsg.outtext('等待板卡ha状态为6',card=True)
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                while hastate != '6' and resetcount < 360:
-                                    time.sleep(3)
-                                    resetcount = resetcount + 1
-                                    hastate = gethastate(outmsg, net_connect, **dev_info)
-                                    print('ha state <> 6  now hastate ={}'.format(hastate))
-                                resulttext = resulttext + '板卡HA状态={}'.format(hastate)
-                        else:
-                            outmsg.outtext('不自动重启')
+                        outmsg.outtext(resulttext)
+                        outmsg.fpgaRes(resulttext)
                     else:
                         resulttext = '上传版本失败'
                         print('上传版本失败')
-
-                    showtext = '升级FPGA{} {} '.format(rowData.get('升级FPGA文件名'), resulttext)
-                    outmsg.outtext(resulttext)
+                        outmsg.fpgaRes(resulttext)
 
                 if getrowdata('升级CPLD文件名', rowData) is None:
                     print('升级CPLD文件名为空不升级')
@@ -552,28 +366,31 @@ def task(rowData):
                     print('开始升级 cpld')
                     #text.insert('end', '\n {}'.format('开始升级 cpld {}'.format(rowData.get('升级CPLD文件名'))))
                     outmsg.setupfilename(rowData.get('升级CPLD文件名'))
-                    outmsg.outtext( '开始升级 ')
-                    if backInfo is None:
-                        ###
-                        print('只有单板主控')
-                        downloadcpld = ' download   cpld  ftp '
-                        print(downloadcpld)
-                        ftpcmdret = net_connect.send_command(downloadcpld, expect_string=r':')
+                    outmsg.outtext('开始升级 cpld')
+
+                    if g_tftp:
+                        downloadcpld = ' download   cpld  tftp '
                     else:
-                        print('有主备主控')
-                        downloadcpld = ' download svcfile  cpld    ftp '
-                        print(downloadcpld)
-                        ftpcmdret = net_connect.send_command(downloadcpld, expect_string=r':')
-                        print(ftpcmdret)
-                        slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
-                        ftpcmdret += net_connect.send_command(slotidcmd, expect_string=r':')
+                        downloadcpld = ' download   cpld  ftp '
+                    print(downloadcpld)
+                    ftpcmdret = net_connect.send_command(downloadcpld, expect_string=r':')
+
+
                     print(ftpcmdret)
                     ipcmd = '{}'.format(rowData['ftpip'])
                     ftpcmdret += net_connect.send_command(ipcmd, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftpuser'])
-                    ftpcmdret += net_connect.send_command(ftpcmd, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftppasswd'])
-                    ftpcmdret += net_connect.send_command(ftpcmd, expect_string=r':')
+
+                    if g_tftp:
+                        ftpcmd = "69"
+                        ftpcmdret += net_connect.send_command(ftpcmd, read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
+                    else:
+                        ftpcmd = '{}'.format(rowData['ftpuser'])
+                        ftpcmdret += net_connect.send_command(ftpcmd, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftppasswd'])
+                        ftpcmdret += net_connect.send_command(ftpcmd, expect_string=r':')
+
+
                     ftpcmd = '{}'.format(rowData.get('升级CPLD文件名'))
                     ftpcmdret += net_connect.send_command(ftpcmd, expect_string=r':')
                     needreboot = False
@@ -583,84 +400,13 @@ def task(rowData):
                     if 'Copy file successfully!' in ftpcmdret:
                         resulttext = '上传版本成功'
                         print('上传版本成功')
-                        outmsg.outtext(' 上传版本成功')
-                        #text.insert('end', '\n {} {}'.format(rowData.get('升级CPLD文件名') , resulttext))
-                        if g_model == "YES":
-                            if 1 == 2:
-                                pass
-                                ##一张主控直接reboot
-                                rebootcmd = 'reboot'
-                                print('reboot ....')
-                                outmsg.outtext("开始重启板卡请等待",card=True)
-                                rebootret = net_connect.send_command(rebootcmd, expect_string=r'\)')
-                                print('reboot return={}'.format(rebootret))
-                                time.sleep(2)
-                                rebootret = net_connect.send_command('y', expect_string=r'#')
-
-                                print('rebootret=={}'.format(rebootret))
-                                time.sleep(10)
-                                net_connect = reconnect(360, 10, dev_info)
-                                if net_connect is not None:
-                                    alertinfo = '主控板重启成功 '
-                                    #text.insert('end', '\n {}'.format(alertinfo))
-                                    outmsg.outtext(alertinfo)
-                                else:
-                                    alertinfo = '主控板重启成功失败请人工检查'
-                                    #text.insert('end', '\n {}'.format(alertinfo))
-                                    outmsg.outtext(alertinfo)
-                            else:
-                                # resetflag = 1
-                                resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                                resetret = net_connect.send_command(resetcmd)
-                                time.sleep(10)
-
-
-                                net_connectpack = [net_connect]
-                                resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                net_connect = net_connectpack[0]
-                                resetcount = 0
-                                while resetCard.get('State') != 'working' and resetcount < 360:
-                                    time.sleep(10)
-                                    resetcount = resetcount + 1
-
-                                    net_connectpack = [net_connect]
-                                    resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                    net_connect = net_connectpack[0]
-                                    print('not card state <> working waiting... 10seconds')
-                                print('get working state ={}'.format(resetCard.get('State')))
-                                if resetCard.get('State') != 'working':
-                                    alertinfo = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                                    #text.insert('end', '\n {}'.format(alertinfo))
-                                else:
-                                    resulttext = '上传版本成功，重启板卡成功'
-                                    print('上传版本成功，重启板卡成功')
-                        else:
-                            outmsg.outtext('不自动重启')
+                        outmsg.outtext('上传版本成功不自动重启')
+                        outmsg.fpgaRes(resulttext)
                     else:
+                        resulttext = '上传版本失败'
+                        outmsg.outtext('上传版本失败')
+                        outmsg.fpgaRes(resulttext)
 
-                        net_connectpack = [net_connect]
-                        resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                        net_connect = net_connectpack[0]
-                        resetcount = 0
-                        while resetCard.get('State') != 'working' and resetcount < 360:
-                            time.sleep(10)
-                            resetcount = resetcount + 1
-
-                            net_connectpack = [net_connect]
-                            resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                            net_connect = net_connectpack[0]
-                            print('not card state <> working waiting... 10seconds')
-                        print('get working state ={}'.format(resetCard.get('State')))
-                        if resetCard.get('State') != 'working':
-                            alertinfo = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                            #text.insert('end', '\n {}'.format(alertinfo))
-                        else:
-                            resulttext = '升级成功'
-                            print(resulttext)
-
-                    showtext = '升级CPLD{} {} '.format(rowData.get('升级CPLD文件名'), resulttext)
-                    #text.insert('end', '\n {}'.format(showtext))
-                    outmsg.outtext(resulttext)
                 '''
                 ##一次性重启 reset
                 ##reset card
@@ -742,33 +488,17 @@ def task(rowData):
                 text.insert('end', '\n {}'.format('升级文件名空,不用升级'))
                 pass
             else:
-                if masterInfo is not None:
-                    ##有主控备板 需要ha
-                    if masterInfo.get('Slot') == rowData.get('solt id'):
-                        print('备板已经是主控要做ha切换')
-                        ###
-                        net_connect, ha_result = haswitch(masterInfo.get('Slot'), net_connect, **dev_info)
-                        if ha_result == False:
-                            msgtext = 'ha切换失败请检查 {}'.format(rowData)
-                            #text.insert('end', '\n {}'.format(msgtext))
-                            outmsg.finnalRes('ha切换失败请检查')
-                            msgqueue.put(outmsg)
-                            outmsg.outtext('ha切换失败请检查')
-                            return 'ha切换失败请检查'
-                        pass
-                    else:
-                        print('二次确认主控备板是备状态')
-                        pass
-                    ##做ha 切换
-                    ## 表面已经切换好了
                 if getrowdata('升级bootrom文件名', rowData) is None:
                     print('升级bootrom文件名为空不升级')
                 else:
                     print('开始升级 bootrom')
                     outmsg.setupfilename(rowData.get('升级bootrom文件名'))
+                    outmsg.outtext('开始升级 bootrom')
                     #text.insert('end', '\n {}'.format('升级bootrom {}'.format(rowData.get('升级bootrom文件名'))))
-                    outmsg.outtext('开始升级')
-                    cmd = ' download  svcfile  bootrom  ftp '
+                    if g_tftp:
+                        cmd = ' download  svcfile  bootrom  tftp '
+                    else:
+                        cmd = ' download  svcfile  bootrom  ftp '
                     print(cmd)
                     ftpcmdret = net_connect.send_command(cmd, read_timeout=10, expect_string=r':')
                     print(ftpcmdret)
@@ -780,13 +510,18 @@ def task(rowData):
                     print(ipcmd)
                     ftpcmdret = net_connect.send_command(rowData['ftpip'], read_timeout=10, expect_string=r':')
                     print(ftpcmdret)
-                    ftpcmd = '{}'.format(rowData['ftpuser'])
-                    print(ftpcmd)
-                    ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=10, expect_string=r':')
-                    print(ftpcmdret)
-                    ftpcmd = '{}'.format(rowData['ftppasswd'])
-                    ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=10, expect_string=r':')
-                    print(ftpcmdret)
+                    if g_tftp:
+                        ftpcmd = "69"
+                        ftpcmdret += net_connect.send_command(ftpcmd, read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
+                    else:
+                        ftpcmd = '{}'.format(rowData['ftpuser'])
+                        print(ftpcmd)
+                        ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=10, expect_string=r':')
+                        print(ftpcmdret)
+                        ftpcmd = '{}'.format(rowData['ftppasswd'])
+                        ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=10, expect_string=r':')
+                        print(ftpcmdret)
                     ftpcmd = '{}'.format(rowData.get('升级bootrom文件名'))
                     print('bootrom file={}'.format(ftpcmd))
                     ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=10, expect_string=r':')
@@ -797,64 +532,14 @@ def task(rowData):
                         resulttext = '上传版本成功'
                         print('上传版本成功')
                         resetFlag = True
-
-                        outmsg.outtext('上传版本成功')
-                        outmsg.bootromRes('上传版本成功')
-                        if g_model == "YES":
-                            resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                            print('reset cmd={}'.format(resetcmd))
-                            resetret = net_connect.send_command(resetcmd)
-                            time.sleep(10)
-                            resulttext = 'reset 板卡'
-                            #text.insert('end', '\n {}'.format(resulttext))
-                            outmsg.outtext('reset板卡 需要等待')
-                            print('after reset card get slot state')
-
-                            net_connectpack = [net_connect]
-                            resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                            net_connect = net_connectpack[0]
-                            print('get resetCard={}'.format(resetCard))
-                            resetcount = 0
-                            while resetCard.get('State') != 'working' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-
-                                net_connectpack = [net_connect]
-                                resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                net_connect = net_connectpack[0]
-                                print('not card state <> working waiting... 3seconds')
-                            print('get working state ={}'.format(resetCard.get('State')))
-                            if resetCard.get('State') != 'working':
-                                resulttext = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                                print(resulttext)
-                                outmsg.bootromRes(resulttext)
-                                outmsg.outtext(resulttext)
-                            else:
-                                resulttext = '上传版本成功，重启板卡成功'
-                                print('上传版本成功，重启板卡成功')
-                                outmsg.bootromRes(resulttext)
-                                outmsg.outtext(resulttext)
-
-                            resetcount = 0
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            time.sleep(10)
-                            outmsg.outtext('等待板卡ha状态为6')
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            while hastate != '6' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                print('ha state <> 6  now hastate ={}'.format(hastate))
-                            resulttext = '板卡HA状态={}'.format(hastate)
-                        else:
-                            outmsg.outtext("不自动重启")
+                        outmsg.bootromRes('上传版本成功 不自动重启')
+                        outmsg.outtext('上传版本成功 不自动重启')
                     else:
                         resulttext = '上传版本失败'
                         outmsg.bootromRes(resulttext)
                         print('上传版本失败')
+                        outmsg.outtext(resulttext)
 
-                    showtext = 'bootrom {} {}'.format(rowData.get('升级bootrom文件名'), resulttext)
-                    outmsg.outtext(resulttext)
 
                 if getrowdata('升级Software文件名', rowData) is None:
                     print('升级Software文件名为空不升级')
@@ -862,9 +547,13 @@ def task(rowData):
                     print('开始升级 software')
                     outmsg.setupfilename(rowData.get('升级Software文件名'))
                     print('software filename ={}'.format(rowData.get('升级Software文件名')))
-                    outmsg.outtext('开始升级 ')
+                    outmsg.outtext('开始升级 software')
                     #text.insert('end', '\n {}'.format('software={}'.format(rowData.get('升级Software文件名'))))
-                    downloadbootrom = ' download  svcfile  system-boot   ftp '
+                    if g_tftp:
+                        downloadbootrom = ' download  svcfile  system-boot   tftp '
+                    else:
+                        downloadbootrom = ' download  svcfile  system-boot   ftp '
+
                     ftpcmdret = net_connect.send_command(downloadbootrom,read_timeout=30, expect_string=r':')
                     slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
                     ftpcmdret += net_connect.send_command(slotidcmd,read_timeout=30, expect_string=r':')
@@ -878,22 +567,30 @@ def task(rowData):
                     print(ftpcmd)
                     print(ftpcmdret)
                     ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=30,expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftpuser'])
-                    print(ftpcmd)
-                    print(ftpcmdret)
-                    ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftppasswd'])
-                    print(ftpcmd)
-                    print(ftpcmdret)
-                    ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    print(ftpcmdret)
+
+
+                    if g_tftp:
+                        ftpcmd = "69"
+                        ftpcmdret += net_connect.send_command(ftpcmd, read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
+                    else:
+                        ftpcmd = '{}'.format(rowData['ftpuser'])
+                        print(ftpcmd)
+                        print(ftpcmdret)
+                        ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftppasswd'])
+                        print(ftpcmd)
+                        print(ftpcmdret)
+                        ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
                     ftpcmd = '{}'.format(rowData.get('升级Software文件名'))
                     print(ftpcmd)
                     ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
                     print(ftpcmdret)
                     ftpcmd = 'y'
                     print(ftpcmd)
-                    ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
+
+                    ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=5000, expect_string=r'#')
                     print('get upload system-boot result={}'.format(ftpcmdret))
                     print(ftpcmdret)
                     if 'Copy file successfully!' in ftpcmdret:
@@ -901,63 +598,9 @@ def task(rowData):
                         print('上传版本成功')
                         resetFlag = True
                         # resetflag = 1
-                        outmsg.outtext('上传版本成功')
+                        outmsg.outtext('上传版本成功 不重启')
                         outmsg.softwareRes(resulttext)
-                        if g_model == "YES":
-                            #text.insert('end', '\n {} {}'.format(rowData.get('升级Software文件名'), resulttext))
-                            resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                            print('reset cmd={}'.format(resetcmd))
-                            resetret = net_connect.send_command(resetcmd)
-                            time.sleep(10)
-                            print('after reset card get slot state')
-                            resulttext = 'reset 板卡'
-                            #text.insert('end', '\n {}'.format(resulttext))
-                            outmsg.outtext(resulttext)
 
-                            net_connectpack = [net_connect]
-                            resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                            net_connect = net_connectpack[0]
-                            print('get resetCard={}'.format(resetCard))
-                            resetcount = 0
-                            while resetCard.get('State') != 'working' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-
-                                net_connectpack = [net_connect]
-                                resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                net_connect = net_connectpack[0]
-                                print('not card state <> working waiting... 3seconds')
-                            print('get working state ={}'.format(resetCard.get('State')))
-                            if resetCard.get('State') != 'working':
-                                resulttext = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                                print(resulttext)
-                                resulttext = '上传版本成功，状态不是working'
-                                outmsg.softwareRes(resulttext)
-
-                            else:
-                                resulttext = '上传版本成功，重启板卡成功'
-                                outmsg.softwareRes(resulttext)
-                                print('上传版本成功，重启板卡成功')
-
-                            ''' 
-                            resetcount = 0
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            time.sleep(10)
-                            outmsg.outtext('等待板卡ha状态为6')
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            while hastate != '6' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                print('ha state <> 6  now hastate ={}'.format(hastate))
-                            resulttext = resulttext + '板卡HA状态={}'.format(hastate)
-                            outmsg.softwareRes(resulttext)
-                            '''
-                        else:
-                            outmsg.outtext("不自动重启")
-                            resulttext = '上传版本失败'
-                            outmsg.softwareRes(resulttext)
-                            print('上传版本失败')
 
                     else:
                         outmsg.outtext("上传版本失败")
@@ -969,17 +612,25 @@ def task(rowData):
                     outmsg.setupfilename(rowData.get('升级FPGA文件名'))
                     showtext ='开始升级 fpga  {}'.format(rowData.get('升级FPGA文件名'))
                     #text.insert('end', '\n {}'.format('开始升级 fpga  {}'.format(rowData.get('升级FPGA文件名'))))
-                    outmsg.outtext('开始升级')
-                    downloadbootrom = ' download  svcfile fpga      ftp '
+                    if g_tftp:
+                        downloadbootrom = ' download  svcfile fpga      tftp '
+                    else:
+                        downloadbootrom = ' download  svcfile fpga      ftp '
+                    outmsg.outtext('开始升级 fpga')
                     downret = net_connect.send_command(downloadbootrom, expect_string=r':')
                     slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
                     downret = net_connect.send_command(slotidcmd, expect_string=r':')
                     ipcmd = '{}'.format(rowData['ftpip'])
                     ipcmdret = net_connect.send_command(ipcmd, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftpuser'])
-                    ftpcmdret = net_connect.send_command(ftpcmd, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftppasswd'])
-                    portcmdret = net_connect.send_command(ftpcmd, expect_string=r':')
+                    if g_tftp:
+                        ftpcmd = "69"
+                        ftpcmdret += net_connect.send_command(ftpcmd, read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
+                    else:
+                        ftpcmd = '{}'.format(rowData['ftpuser'])
+                        ftpcmdret = net_connect.send_command(ftpcmd, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftppasswd'])
+                        portcmdret = net_connect.send_command(ftpcmd, expect_string=r':')
                     ftpcmd = '{}'.format(rowData.get('升级FPGA文件名'))
                     net_connect.send_command(ftpcmd, expect_string=r':')
                     ftpcmd = 'y'
@@ -990,63 +641,12 @@ def task(rowData):
                         print('上传版本成功')
                         resetFlag = True
                         outmsg.fpgaRes(resulttext)
-                        if g_model == "YES":
-                            #text.insert('end', '\n {} {}'.format(rowData.get('升级FPGA文件名') , resulttext))
-                            showtext = '{} 上传版本成功 '.format(rowData.get('升级FPGA文件名'))
-                            outmsg.outtext('上传版本成功')
-                            resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                            print('reset cmd={}'.format(resetcmd))
-                            resetret = net_connect.send_command(resetcmd)
-                            time.sleep(10)
-                            print('after reset card get slot state')
-                            resulttext = 'reset 板卡'
-                            #text.insert('end', '\n {}'.format(resulttext))
-                            outmsg.outtext(resulttext)
-
-                            net_connectpack = [net_connect]
-                            resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                            net_connect = net_connectpack[0]
-                            print('get resetCard={}'.format(resetCard))
-                            resetcount = 0
-                            while resetCard.get('State') != 'working' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-
-                                net_connectpack = [net_connect]
-                                resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                net_connect = net_connectpack[0]
-                                print('not card state <> working waiting... 3seconds')
-                            print('get working state ={}'.format(resetCard.get('State')))
-                            if resetCard.get('State') != 'working':
-                                resulttext = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                                print(resulttext)
-                                outmsg.fpgaRes(resulttext)
-                            else:
-                                resulttext = '上传版本成功，重启板卡成功'
-                                outmsg.fpgaRes(resulttext)
-                                print('上传版本成功，重启板卡成功')
-
-                            outmsg.outtext(resulttext)
-                            resetcount = 0
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            time.sleep(10)
-                            '''
-                            outmsg.outtext('等待板卡ha状态为6')
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            while hastate != '6' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                print('ha state <> 6  now hastate ={}'.format(hastate))
-                            resulttext = resulttext + '板卡HA状态={}'.format(hastate)
-                            outmsg.fpgaRes(resulttext)
-                            '''
-                        else:
-                            outmsg.outtext("不自动重启")
+                        outmsg.outtext(resulttext)
                     else:
                         resulttext = '上传版本失败'
                         outmsg.fpgaRes(resulttext)
                         print('上传版本失败')
+                        outmsg.outtext(resulttext)
                     showtext = '升级FPGA {} {}'.format(rowData.get('升级FPGA文件名'), resulttext)
                     outmsg.outtext(resulttext)
 
@@ -1058,18 +658,28 @@ def task(rowData):
                     print('开始升级cpld')
                     outmsg.setupfilename(rowData.get('升级CPLD文件名'))
                     showtext = '开始升级cpld ={}'.format(rowData.get('升级CPLD文件名'))
-                    outmsg.outtext('开始升级')
+
+                    outmsg.outtext('开始升级cpld')
                     #text.insert('end', '\n {}'.format('开始升级cpld ={}'.format(rowData.get('升级CPLD文件名'))))
-                    downloadbootrom = ' download  svcfile cpld      ftp '
+                    if g_tftp:
+                        downloadbootrom = ' download  svcfile cpld      tftp '
+                    else:
+                        downloadbootrom = ' download  svcfile cpld      ftp '
                     downret = net_connect.send_command(downloadbootrom,read_timeout=30, expect_string=r':')
                     slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
                     downret = net_connect.send_command(slotidcmd, read_timeout=30,expect_string=r':')
                     ipcmd = '{}'.format(rowData['ftpip'])
                     ipcmdret = net_connect.send_command(ipcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftpuser'])
-                    ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftppasswd'])
-                    portcmdret = net_connect.send_command(ftpcmd, read_timeout=30,expect_string=r':')
+                    if g_tftp:
+                        ftpcmd = "69"
+                        ftpcmdret += net_connect.send_command(ftpcmd, read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
+                    else:
+                        ftpcmd = '{}'.format(rowData['ftpuser'])
+                        ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=30, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftppasswd'])
+                        portcmdret = net_connect.send_command(ftpcmd, read_timeout=30, expect_string=r':')
+
                     ftpcmd = '{}'.format(rowData.get('升级CPLD文件名'))
                     net_connect.send_command(ftpcmd, read_timeout=100, expect_string=r':')
                     ftpcmd = 'y'
@@ -1082,132 +692,15 @@ def task(rowData):
                         # resetflag = 1
                         outmsg.outtext('上传版本成功')
                         outmsg.fpgaRes(resulttext)
-                        if g_model == "YES":
-                            #text.insert('end', '\n {} {}'.format(rowData.get('升级CPLD文件名'), resulttext))
-                            outmsg.outtext('reset等待')
-                            resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                            resetret = net_connect.send_command(resetcmd)
-                            time.sleep(3)
 
-                            net_connectpack = [net_connect]
-                            resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                            net_connect = net_connectpack[0]
-                            resetcount = 0
-                            while resetCard.get('State') != 'working' and resetcount < 360:
-                                time.sleep(10)
-                                resetcount = resetcount + 1
-
-                                net_connectpack = [net_connect]
-                                resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                net_connect = net_connectpack[0]
-                                print('not card state <> working waiting... 10seconds')
-                            print('get working state ={}'.format(resetCard.get('State')))
-                            if resetCard.get('State') != 'working':
-                                alertinfo = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                                #text.insert('end', '\n {}'.format(alertinfo))
-                                outmsg.fpgaRes(alertinfo)
-                            else:
-                                resulttext = '上传版本成功，重启板卡成功'
-                                outmsg.outtext(resulttext)
-                                print('上传版本成功，重启板卡成功')
-                                outmsg.outtext('板卡reset成功，等待ha 状态变成6')
-                                print('板卡reset成功，等待ha 状态变成6')
-                                #text.insert('end', '\n {}'.format('板卡reset成功，等待ha 状态变成6'))
-                                time.sleep(10)
-                                ''' 
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                while hastate != '6' and resetcount < 360:
-                                    time.sleep(3)
-                                    msgtemp = 'HA 状态不是6 继续等待'
-
-                                    resetcount = resetcount + 1
-                                    hastate = gethastate(outmsg, net_connect, **dev_info)
-                                    print('ha state <> 6  now hastate ={}'.format(hastate))
-                                if hastate != '6':
-                                    print('ha state <> 6  now hastate ={}'.format(hastate))
-                                    resulttext = '上传版本成功，重启板卡成功 ha状态不为6需要检查'
-                                    outmsg.fpgaRes(resulttext)
-                                    # text.insert('end', '\n {}'.format('板卡reset成功， ha状态不是6 请检查'))
-                                else:
-                                    print('上传版本成功，重启板卡成功 ha状态切换成6')
-                                    resulttext = '上传版本成功，重启板卡成功 ha状态切换成6'
-                                    outmsg.fpgaRes(resulttext)
-                                    #text.insert('end', '\n {}'.format('板卡reset成功， ha状态切换成6'))
-                                    '''
-                        else:
-                            outmsg.outtext("不自动重启")
                     else:
                         resulttext = '上传版本失败'
                         outmsg.fpgaRes(resulttext)
+                        outmsg.outtext(resulttext)
                         print('上传版本失败')
                     showtext = '升级CPLD文件名 {} {}'.format(rowData.get('升级CPLD文件名'), resulttext)
                     outmsg.outtext(resulttext)
-                '''
-                if needreboot == True:
-                    if onemaster:
-                        pass
-                        ##一张主控直接reboot
-                        rebootcmd = 'reboot'
-                        print('reboot ....')
-                        outmsg.outtext("开始重启板卡请等待",card=True)
-                        rebootret = net_connect.send_command(rebootcmd, expect_string=r'\)')
-                        print('reboot return={}'.format(rebootret))
-                        time.sleep(2)
-                        rebootret = net_connect.send_command('y', expect_string=r'#')
 
-                        print('rebootret=={}'.format(rebootret))
-                        time.sleep(10)
-                        net_connect = reconnect(360, 10, dev_info)
-                        if net_connect is not None:
-                            alertinfo = '主控板重启成功 '
-                            # text.insert('end', '\n {}'.format(alertinfo))
-                            outmsg.outtext(alertinfo)
-                        else:
-                            alertinfo = '主控板重启成功失败请人工检查'
-                            # text.insert('end', '\n {}'.format(alertinfo))
-                            outmsg.outtext(alertinfo)
-                    else:
-                        # resetflag = 1
-                        outmsg.outtext("开始重启板卡请等待",card=True)
-                        resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                        resetret = net_connect.send_command(resetcmd)
-                        time.sleep(10)
-
-                        net_connectpack = [net_connect]
-                        resetCard = getslotstate(rowData.get('solt id'), dev_info, net_connectpack)
-                        net_connect = net_connectpack[0]
-                        resetcount = 0
-                        while resetCard.get('State') != 'working' and resetcount < 360:
-                            time.sleep(10)
-                            resetcount = resetcount + 1
-
-                            net_connectpack = [net_connect]
-                            resetCard = getslotstate(rowData.get('solt id'), dev_info, net_connectpack)
-                            net_connect = net_connectpack[0]
-                            print('not card state <> working waiting... 10seconds')
-                        print('get working state ={}'.format(resetCard.get('State')))
-                        if resetCard.get('State') != 'working':
-                            alertinfo = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                            # text.insert('end', '\n {}'.format(alertinfo))
-                        else:
-                            resulttext = '上传版本成功，重启板卡成功'
-                            print('上传版本成功，重启板卡成功')
-                        resetcount = 0
-                        hastate = gethastate(outmsg, net_connect, **dev_info)
-                        time.sleep(10)
-                        outmsg.outtext('等待板卡ha状态为6',card=True)
-                        hastate = gethastate(outmsg, net_connect, **dev_info)
-                        while hastate != '6' and resetcount < 360:
-                            time.sleep(3)
-                            resetcount = resetcount + 1
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            print('ha state <> 6  now hastate ={}'.format(hastate))
-
-                        if hastate != '6':
-                            outmsg.outtext('板卡HA状态不为6，需要检查')
-                        else:
-                            outmsg.outtext('板卡HA状态为6，升级成功')
-                '''
         if rowData['板卡属性'] == '业务板':
 
             print('业务板 升级开始...')
@@ -1225,98 +718,51 @@ def task(rowData):
                     print('开始升级BOOTROM...')
                     showtext = '升级bootrom  {}'.format(rowData.get('升级bootrom文件名'))
                     outmsg.setupfilename(rowData.get('升级bootrom文件名'))
-                    outmsg.outtext('开始升级')
+
                     #text.insert('end', '\n {}'.format(showtext))
-                    downloadbootrom = ' download  svcfile  bootrom  ftp '
-                    downret = net_connect.send_command(downloadbootrom,read_timeout=30, expect_string=r':')
-                    slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
-                    downret = net_connect.send_command(slotidcmd,read_timeout=30, expect_string=r':')
-                    ipcmd = '{}'.format(rowData['ftpip'])
-                    ipcmdret = net_connect.send_command(ipcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftpuser'])
-                    ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftppasswd'])
-                    portcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData.get('升级bootrom文件名'))
-                    net_connect.send_command(ftpcmd, expect_string=r':')
-                    ftpcmd = 'y'
-                    ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
-                    print(ftpcmdret)
+                    if g_tftp == True:
+                        downloadbootrom = ' download  svcfile  bootrom  tftp '
+                        downret = net_connect.send_command(downloadbootrom,read_timeout=30, expect_string=r':')
+                        slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
+                        downret = net_connect.send_command(slotidcmd,read_timeout=30, expect_string=r':')
+                        ipcmd = '{}'.format(rowData['ftpip'])
+                        ipcmdret = net_connect.send_command(ipcmd,read_timeout=30, expect_string=r':')
+                        ipcmdret = net_connect.send_command("69", read_timeout=30, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData.get('升级bootrom文件名'))
+                        net_connect.send_command(ftpcmd, expect_string=r':')
+                        ftpcmd = 'y'
+                        ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
+                        print(ftpcmdret)
+                    else:
+                        downloadbootrom = ' download  svcfile  bootrom  ftp '
+                        downret = net_connect.send_command(downloadbootrom,read_timeout=30, expect_string=r':')
+                        slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
+                        downret = net_connect.send_command(slotidcmd,read_timeout=30, expect_string=r':')
+                        ipcmd = '{}'.format(rowData['ftpip'])
+                        ipcmdret = net_connect.send_command(ipcmd,read_timeout=30, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftpuser'])
+                        ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftppasswd'])
+                        portcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData.get('升级bootrom文件名'))
+                        net_connect.send_command(ftpcmd, expect_string=r':')
+                        ftpcmd = 'y'
+                        ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
+                        print(ftpcmdret)
+
                     if 'Copy file successfully!' in ftpcmdret:
                         resulttext = '上传版本成功'
                         resetFlag = True
                         print('上传版本成功')
-                        outmsg.outtext(' 上传版本成功 ')
+                        resulttext = '{}上传版本成功'.format(rowData.get('升级bootrom文件名'))
+                        outmsg.outtext(resulttext)
                         outmsg.bootromRes('上传版本成功')
 
-                        if g_model == "YES":
-                            #text.insert('end', '\n {} {} '.format(rowData.get('升级bootrom文件名') , resulttext))
-                            resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                            print('reset cmd={}'.format(resetcmd))
-                            resetret = net_connect.send_command(resetcmd)
-                            time.sleep(10)
-                            print('after reset card get slot state')
-                            resulttext = 'reset 板卡'
-                            outmsg.outtext(resulttext)
-                            #text.insert('end', '\n {}'.format(resulttext))
-
-                            net_connectpack = [net_connect]
-                            resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                            net_connect = net_connectpack[0]
-                            print('get resetCard={}'.format(resetCard))
-                            resetcount = 0
-                            NewCardState = 'wrong' if resetCard is None else resetCard.get('State')
 
 
-                            while NewCardState != 'working' and resetcount < 360:
-                                time.sleep(3)
-
-                                resetcount = resetcount + 1
-
-                                net_connectpack = [net_connect]
-                                resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                net_connect = net_connectpack[0]
-                                NewCardState = 'wrong' if  resetCard is None  else   resetCard.get('State')
-                                print('not card state <> working waiting... 3seconds')
-                            print('get working state ={}'.format(resetCard.get('State')))
-                            if resetCard.get('State') == 'working':
-                                resulttext = '上传版本成功，重启板卡成功'
-                                print('上传版本成功，重启板卡成功')
-                                outmsg.bootromRes(resulttext)
-                            else:
-                                resulttext = '上传版本成功，重启板卡状态不是working'
-                                print('上传版本成功，重启板卡状态不是working')
-                                outmsg.bootromRes(resulttext)
-
-                            resetcount = 0
-                            ##业务办卡是不是不要等ha 状态 先屏蔽
-                            '''
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            time.sleep(10)
-                            outmsg.outtext('等待板卡ha状态为6')
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            while hastate != '6' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                print('ha state <> 6  now hastate ={}'.format(hastate))
-                            if hastate != '6':
-                                resulttext = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                                outmsg.bootromRes(resulttext)
-                                print(resulttext)
-                            else:
-                                resulttext = '上传版本成功，重启板卡成功'
-                                print('上传版本成功，重启板卡成功')
-                                outmsg.bootromRes(resulttext)
-                            
-                            resulttext = resulttext + '板卡HA状态={}'.format(hastate)
-                            '''
-                            #text.insert('end', '\n {}'.format(resulttext))
-                        else:
-                            outmsg.outtext("不自动重启")
                     else:
-
-                        resulttext = '升级失败'
+                        resulttext = '{}上传升级失败'.format(rowData.get('升级bootrom文件名'))
+                        outmsg.outtext(resulttext)
                         outmsg.bootromRes(resulttext)
                         #text.insert('end', '\n {}'.format(resulttext))
                         print('升级失败')
@@ -1329,101 +775,76 @@ def task(rowData):
                     print('开始升级业务板卡software...')
                     outmsg.setupfilename(rowData.get('升级Software文件名'))
                     #text.insert('end', '\n {} {}'.format(resulttext ,rowData.get('升级Software文件名') ))
-                    outmsg.outtext('开始升级')
-                    ftpcmd = ' download   svcfile  system-boot    ftp '
-                    if "PG8" in rowData['PowerName'] or "PX4" in rowData['PowerName']:
-                        ftpcmd = ' download    svcfile mcu ftp      '
-                    #text.insert('end', '\n 开始升级software '.format(rowData.get('升级Software文件名')))
-                    print('业务板卡升级命令={}'.format(ftpcmd))
-                    ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    print(ftpcmdret)
-                    ftpcmd = '{} {}'.format(' slot ', rowData['solt id'])
-                    print(ftpcmd)
-                    ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=30,expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftpip'])
-                    print(ftpcmd)
-                    print(ftpcmdret)
-                    ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftpuser'])
-                    print(ftpcmd)
-                    print(ftpcmdret)
-                    ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftppasswd'])
-                    print(ftpcmd)
-                    print(ftpcmdret)
-                    ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=30,expect_string=r':')
-                    print(ftpcmdret)
-                    ftpcmd = '{}'.format(rowData.get('升级Software文件名'))
-                    print(ftpcmd)
-                    ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    print(ftpcmdret)
-                    ftpcmd = 'y'
-                    print(ftpcmd)
-                    ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
-                    print(ftpcmdret)
+                    if g_tftp == True:
+                        ftpcmd = ' download   svcfile  system-boot    tftp '
+                        if "PG8" in rowData['PowerName'] or "PX4" in rowData['PowerName']:
+                            ftpcmd = ' download    svcfile mcu tftp      '
+                        #text.insert('end', '\n 开始升级software '.format(rowData.get('升级Software文件名')))
+                        print('业务板卡升级命令={}'.format(ftpcmd))
+                        ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
+                        ftpcmd = '{} {}'.format(' slot ', rowData['solt id'])
+                        print(ftpcmd)
+                        ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=30,expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftpip'])
+                        print(ftpcmd)
+                        print(ftpcmdret)
+                        ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        ipcmdret = net_connect.send_command("69", read_timeout=30, expect_string=r':')
+
+                        ftpcmd = '{}'.format(rowData.get('升级Software文件名'))
+                        print(ftpcmd)
+                        ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
+                        ftpcmd = 'y'
+                        print(ftpcmd)
+                        ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
+                        print(ftpcmdret)
+                    else:
+                        ftpcmd = ' download   svcfile  system-boot    ftp '
+                        if "PG8" in rowData['PowerName'] or "PX4" in rowData['PowerName']:
+                            ftpcmd = ' download    svcfile mcu ftp      '
+                        #text.insert('end', '\n 开始升级software '.format(rowData.get('升级Software文件名')))
+                        print('业务板卡升级命令={}'.format(ftpcmd))
+                        ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
+                        ftpcmd = '{} {}'.format(' slot ', rowData['solt id'])
+                        print(ftpcmd)
+                        ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=30,expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftpip'])
+                        print(ftpcmd)
+                        print(ftpcmdret)
+                        ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftpuser'])
+                        print(ftpcmd)
+                        print(ftpcmdret)
+                        ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftppasswd'])
+                        print(ftpcmd)
+                        print(ftpcmdret)
+                        ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=30,expect_string=r':')
+                        print(ftpcmdret)
+                        ftpcmd = '{}'.format(rowData.get('升级Software文件名'))
+                        print(ftpcmd)
+                        ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        print(ftpcmdret)
+                        ftpcmd = 'y'
+                        print(ftpcmd)
+                        ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
+                        print(ftpcmdret)
+
+
                     if 'Copy file successfully!' in ftpcmdret:
                         resulttext = '上传版本成功'
                         resetFlag = True
                         print('上传版本成功')
                         outmsg.outtext('上传版本成功')
+                        resulttext = '{}上传版本成功'.format(rowData.get('升级Software文件名'))
                         outmsg.softwareRes('上传版本成功')
-                        if g_model == "YES":
-                            #text.insert('end', '\n {} {}'.format(rowData.get('升级Software文件名'), resulttext))
-                            resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                            print('reset cmd={}'.format(resetcmd))
-                            resetret = net_connect.send_command(resetcmd)
-                            time.sleep(10)
-                            print('after reset card get slot state')
-
-                            net_connectpack = [net_connect]
-                            resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                            net_connect = net_connectpack[0]
-                            print('get resetCard={}'.format(resetCard))
-                            resetcount = 0
-                            resulttext = 'reset 板卡'
-                            #text.insert('end', '\n {}'.format(resulttext))
-                            outmsg.outtext(resulttext)
-                            NewCardState = 'wrong' if  resetCard is None  else   resetCard.get('State')
-
-                            while NewCardState != 'working' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-
-                                net_connectpack = [net_connect]
-                                resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                net_connect = net_connectpack[0]
-                                NewCardState = 'wrong' if  resetCard is None  else   resetCard.get('State')
-                                print('not card state <> working waiting... 3seconds')
-                            print('get working state ={}'.format(resetCard.get('State')))
-                            if resetCard.get('State') != 'working':
-                                resulttext = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                                print(resulttext)
-                                outmsg.softwareRes(resulttext)
-                            else:
-                                resulttext = '上传版本成功，重启板卡成功'
-                                outmsg.softwareRes(resulttext)
-                                print('上传版本成功，重启板卡成功')
-                            outmsg.outtext(resulttext)
-                            resetcount = 0
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            time.sleep(10)
-                            '''
-                            outmsg.outtext('等待板卡ha状态为6')
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            while hastate != '6' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                print('ha state <> 6  now hastate ={}'.format(hastate))
-                            resulttext = resulttext + '板卡HA状态={}'.format(hastate)
-                            #text.insert('end', '\n {}'.format(resulttext))
-                            outmsg.outtext(resulttext)
-                            '''
-                        else:
-                            outmsg.outtext("不自动重启")
                     else:
-                        resulttext = '升级失败'
-                        print('升级失败')
+                        resulttext = '上传版本失败'
+                        print('上传版本失败')
+                        resulttext = '{}上传版本失败'.format(rowData.get('升级Software文件名'))
                         outmsg.softwareRes(resulttext)
                     showtext = '升级Software {} {}'.format(rowData.get('升级Software文件名'), resulttext)
                     outmsg.outtext(resulttext)
@@ -1432,87 +853,108 @@ def task(rowData):
                 else:
                     print('开始升级FPGA...')
                     resulttext = '开始升级FPGA...'
-                    outmsg.outtext('开始升级 ')
+
                     outmsg.setupfilename(rowData.get('升级FPGA文件名'))
-                    #text.insert('end', '\n {} {} '.format(resulttext,rowData.get('升级FPGA文件名')))
-                    downloadbootrom = ' download  svcfile fpga      ftp '
-                    print(downloadbootrom)
-                    downret = net_connect.send_command(downloadbootrom,read_timeout=30, expect_string=r':')
-                    slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
-                    downret = net_connect.send_command(slotidcmd,read_timeout=30, expect_string=r':')
-                    ipcmd = '{}'.format(rowData['ftpip'])
-                    ipcmdret = net_connect.send_command(ipcmd, read_timeout=30,expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftpuser'])
-                    ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftppasswd'])
-                    portcmdret = net_connect.send_command(ftpcmd, read_timeout=30,expect_string=r':')
-                    ftpcmd = '{}'.format(rowData.get('升级FPGA文件名'))
-                    net_connect.send_command(ftpcmd, expect_string=r':')
-                    ftpcmd = 'y'
-                    ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
-                    print(ftpcmdret)
+                    fpgafilename = rowData.get('升级FPGA文件名')
+                    print('开始上传文件{}'.format(fpgafilename))
+                    if  "," in fpgafilename:
+                        for filename in fpgafilename.split(","):
+                            # text.insert('end', '\n {} {} '.format(resulttext,rowData.get('升级FPGA文件名')))
+                            outmsg.setupfilename(filename)
+                            print('开始上传文件{}'.format(filename))
+                            outmsg.outtext('开始上传文件{}'.format(filename))
 
-                    if 'Copy file successfully!' in ftpcmdret:
-                        print('上传文件成功')
-                        resetFlag = True
-                        resulttext = '上传文件成功'
-                        outmsg.outtext('上传文件成功')
-                        outmsg.softwareRes(resulttext)
-                        if g_model == "YES":
-                            resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                            print('reset cmd={}'.format(resetcmd))
-                            resetret = net_connect.send_command(resetcmd)
-                            time.sleep(10)
-                            print('after reset card get slot state')
-                            resulttext = 'reset 板卡'
-                            outmsg.outtext(resulttext)
-                            #text.insert('end', '\n {}'.format(resulttext))
-
-                            net_connectpack = [net_connect]
-                            resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                            net_connect = net_connectpack[0]
-                            print('get resetCard={}'.format(resetCard))
-                            resetcount = 0
-                            NewCardState = 'wrong' if  resetCard is None  else   resetCard.get('State')
-
-                            while NewCardState != 'working' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-
-                                net_connectpack = [net_connect]
-                                resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                net_connect = net_connectpack[0]
-                                NewCardState = 'wrong' if  resetCard is None  else   resetCard.get('State')
-                                print('not card state <> working waiting... 3seconds')
-                            print('get working state ={}'.format(resetCard.get('State')))
-                            if resetCard.get('State') != 'working':
-                                resulttext = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                                print(resulttext)
-                                outmsg.softwareRes(resulttext)
+                            if g_tftp == True:
+                                downloadbootrom = ' download  svcfile fpga      tftp '
+                                print(downloadbootrom)
+                                downret = net_connect.send_command(downloadbootrom, read_timeout=30, expect_string=r':')
+                                slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
+                                downret = net_connect.send_command(slotidcmd, read_timeout=30, expect_string=r':')
+                                ipcmd = '{}'.format(rowData['ftpip'])
+                                ipcmdret = net_connect.send_command(ipcmd, read_timeout=30, expect_string=r':')
+                                ipcmdret = net_connect.send_command("69", read_timeout=30, expect_string=r':')
+                                ftpcmd = '{}'.format(filename)
+                                net_connect.send_command(ftpcmd, expect_string=r':')
+                                ftpcmd = 'y'
+                                ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
+                                print(ftpcmdret)
                             else:
-                                resulttext = '上传版本成功，重启板卡成功'
-                                outmsg.softwareRes(resulttext)
-                                print('上传版本成功，重启板卡成功')
-                            outmsg.outtext(resulttext)
-                            resetcount = 0
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            time.sleep(10)
-                            outmsg.outtext('等待板卡ha状态为6')
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            while hastate != '6' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                print('ha state <> 6  now hastate ={}'.format(hastate))
-                            resulttext = resulttext + '板卡HA状态={}'.format(hastate)
-                        else:
-                            outmsg.outtext("不自动重启")
+                                downloadbootrom = ' download  svcfile fpga      ftp '
+                                print(downloadbootrom)
+                                downret = net_connect.send_command(downloadbootrom, read_timeout=30, expect_string=r':')
+                                slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
+                                downret = net_connect.send_command(slotidcmd, read_timeout=30, expect_string=r':')
+                                ipcmd = '{}'.format(rowData['ftpip'])
+                                ipcmdret = net_connect.send_command(ipcmd, read_timeout=30, expect_string=r':')
+                                ftpcmd = '{}'.format(rowData['ftpuser'])
+                                ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=30, expect_string=r':')
+                                ftpcmd = '{}'.format(rowData['ftppasswd'])
+                                portcmdret = net_connect.send_command(ftpcmd, read_timeout=30, expect_string=r':')
+                                ftpcmd = '{}'.format(filename)
+                                net_connect.send_command(ftpcmd, expect_string=r':')
+                                ftpcmd = 'y'
+                                ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
+                                print(ftpcmdret)
+                            if 'Copy file successfully!' in ftpcmdret:
+                                print('上传文件成功')
+                                resetFlag = True
+                                resulttext = '{}上传文件成功'.format(filename)
+                                outmsg.outtext(resulttext)
+                                outmsg.fpgaResApp(resulttext)
+                            else:
+                                resulttext = '{}上传版本失败'.format(filename)
+                                outmsg.outtext(resulttext)
+                                outmsg.fpgaResApp(resulttext)
+                                print('上传版本失败')
+
+
                     else:
-                        resulttext = '{}上传版本失败'.format(rowData.get('升级FPGA文件名'))
-                        outmsg.softwareRes(resulttext)
-                        print('上传版本失败')
-                    outmsg.outtext(resulttext)
-                    #text.insert('end', '\n {}'.format(resulttext))
+
+                        if g_tftp == True:
+                            downloadbootrom = ' download  svcfile fpga      tftp '
+                            print(downloadbootrom)
+                            downret = net_connect.send_command(downloadbootrom,read_timeout=30, expect_string=r':')
+                            slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
+                            downret = net_connect.send_command(slotidcmd,read_timeout=30, expect_string=r':')
+                            ipcmd = '{}'.format(rowData['ftpip'])
+                            ipcmdret = net_connect.send_command(ipcmd, read_timeout=30,expect_string=r':')
+                            ipcmdret = net_connect.send_command("69", read_timeout=30, expect_string=r':')
+                            ftpcmd = '{}'.format(rowData.get('升级FPGA文件名'))
+                            net_connect.send_command(ftpcmd, expect_string=r':')
+                            ftpcmd = 'y'
+                            ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
+                            print(ftpcmdret)
+                        else:
+                            downloadbootrom = ' download  svcfile fpga      ftp '
+                            print(downloadbootrom)
+                            downret = net_connect.send_command(downloadbootrom,read_timeout=30, expect_string=r':')
+                            slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
+                            downret = net_connect.send_command(slotidcmd,read_timeout=30, expect_string=r':')
+                            ipcmd = '{}'.format(rowData['ftpip'])
+                            ipcmdret = net_connect.send_command(ipcmd, read_timeout=30,expect_string=r':')
+                            ftpcmd = '{}'.format(rowData['ftpuser'])
+                            ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                            ftpcmd = '{}'.format(rowData['ftppasswd'])
+                            portcmdret = net_connect.send_command(ftpcmd, read_timeout=30,expect_string=r':')
+                            ftpcmd = '{}'.format(rowData.get('升级FPGA文件名'))
+                            net_connect.send_command(ftpcmd, expect_string=r':')
+                            ftpcmd = 'y'
+                            ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
+                            print(ftpcmdret)
+
+                        if 'Copy file successfully!' in ftpcmdret:
+                            print('上传文件成功')
+                            resetFlag = True
+                            resulttext = '上传文件成功'
+                            outmsg.outtext('上传文件成功')
+                            outmsg.softwareRes(resulttext)
+
+                        else:
+                            resulttext = '{}上传版本失败'.format(rowData.get('升级FPGA文件名'))
+                            outmsg.softwareRes(resulttext)
+                            print('上传版本失败')
+                        outmsg.outtext(resulttext)
+                        #text.insert('end', '\n {}'.format(resulttext))
 
 
                 if getrowdata('升级CPLD文件名', rowData) is None:
@@ -1521,84 +963,82 @@ def task(rowData):
                     print('升级CPLD...')
                     resulttext = '升级CPLD...'
                     outmsg.setupfilename(rowData.get('升级CPLD文件名'))
-                    outmsg.outtext('开始升级')
-                    downloadbootrom = ' download  svcfile cpld      ftp '
-                    downret = net_connect.send_command(downloadbootrom,read_timeout=30, expect_string=r':')
-                    slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
-                    downret = net_connect.send_command(slotidcmd,read_timeout=30, expect_string=r':')
-                    ipcmd = '{}'.format(rowData['ftpip'])
-                    ipcmdret = net_connect.send_command(ipcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftpuser'])
-                    ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
-                    ftpcmd = '{}'.format(rowData['ftppasswd'])
-                    portcmdret = net_connect.send_command(ftpcmd, read_timeout=30,expect_string=r':')
-                    ftpcmd = '{}'.format(rowData.get('升级CPLD文件名'))
-                    net_connect.send_command(ftpcmd, read_timeout=2000, expect_string=r':')
-                    ftpcmd = 'y'
-                    needreboot = False
-                    ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
-                    print(ftpcmdret)
+                    if g_tftp == True:
+                        downloadbootrom = ' download  svcfile cpld      tftp '
+                        downret = net_connect.send_command(downloadbootrom,read_timeout=30, expect_string=r':')
+                        slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
+                        downret = net_connect.send_command(slotidcmd,read_timeout=30, expect_string=r':')
+                        ipcmd = '{}'.format(rowData['ftpip'])
+                        ipcmdret = net_connect.send_command(ipcmd,read_timeout=30, expect_string=r':')
+                        ipcmdret = net_connect.send_command("69", read_timeout=30, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData.get('升级CPLD文件名'))
+                        net_connect.send_command(ftpcmd, read_timeout=2000, expect_string=r':')
+                        ftpcmd = 'y'
+                        needreboot = False
+                        ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
+                        print(ftpcmdret)
+                    else:
+                        downloadbootrom = ' download  svcfile cpld      ftp '
+                        downret = net_connect.send_command(downloadbootrom,read_timeout=30, expect_string=r':')
+                        slotidcmd = '{} {}'.format(' slot ', rowData['solt id'])
+                        downret = net_connect.send_command(slotidcmd,read_timeout=30, expect_string=r':')
+                        ipcmd = '{}'.format(rowData['ftpip'])
+                        ipcmdret = net_connect.send_command(ipcmd,read_timeout=30, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftpuser'])
+                        ftpcmdret = net_connect.send_command(ftpcmd,read_timeout=30, expect_string=r':')
+                        ftpcmd = '{}'.format(rowData['ftppasswd'])
+                        portcmdret = net_connect.send_command(ftpcmd, read_timeout=30,expect_string=r':')
+                        ftpcmd = '{}'.format(rowData.get('升级CPLD文件名'))
+                        net_connect.send_command(ftpcmd, read_timeout=2000, expect_string=r':')
+                        ftpcmd = 'y'
+                        needreboot = False
+                        ftpcmdret = net_connect.send_command(ftpcmd, read_timeout=1000, expect_string=r'#')
+                        print(ftpcmdret)
                     if 'Copy file successfully!' in ftpcmdret:
                         print('升级成功')
                         resetFlag = True
                         resulttext = '上传文件成功'
                         outmsg.cpldRes(resulttext)
-                        if  g_model == "YES":
-                            #text.insert('end', '\n {} {} '.format(rowData.get('升级CPLD文件名'), resulttext))
-                            outmsg.outtext(' 升级成功')
-                            resetcmd = 'reset card {}'.format(rowData.get('solt id'))
-                            print('reset cmd={}'.format(resetcmd))
-                            resetret = net_connect.send_command(resetcmd)
-                            time.sleep(10)
-                            print('after reset card get slot state')
 
-                            net_connectpack = [net_connect]
-                            resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                            net_connect = net_connectpack[0]
-                            print('get resetCard={}'.format(resetCard))
-                            resulttext = 'reset 板卡'
-                            outmsg.outtext(resulttext)
-                            #text.insert('end', '\n {}'.format(resulttext))
-                            resetcount = 0
-                            NewCardState = 'wrong' if  resetCard is None  else   resetCard.get('State')
-                            while NewCardState != 'working' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-                                net_connectpack = [net_connect]
-                                resetCard = getslotstate(rowData.get('solt id'),  dev_info, net_connectpack)
-                                net_connect = net_connectpack[0]
-                                NewCardState = 'wrong' if  resetCard is None  else   resetCard.get('State')
-                                print('not card state <> working waiting... 3seconds')
-                            print('get working state ={}'.format(resetCard.get('State')))
-                            if resetCard.get('State') != 'working':
-                                resulttext = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
-                                print(resulttext)
-                                outmsg.cpldRes(resulttext)
-                            else:
-                                resulttext = '上传版本成功，重启板卡成功'
-                                outmsg.cpldRes(resulttext)
-                                print('上传版本成功，重启板卡成功')
-                            outmsg.outtext(resulttext)
-
-                            resetcount = 0
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            time.sleep(10)
-                            outmsg.outtext('等待板卡ha状态为6')
-                            hastate = gethastate(outmsg, net_connect, **dev_info)
-                            while hastate != '6' and resetcount < 360:
-                                time.sleep(3)
-                                resetcount = resetcount + 1
-                                hastate = gethastate(outmsg, net_connect, **dev_info)
-                                print('ha state <> 6  now hastate ={}'.format(hastate))
-                            resulttext = resulttext + '板卡HA状态={}'.format(hastate)
-                        else:
-                            outmsg.outtext("不自动重启")
                     else:
                         resulttext = '{}上传版本失败'.format(rowData.get('升级FPGA文件名'))
                         print('升级失败')
                         outmsg.cpldRes(resulttext)
                     outmsg.outtext(resulttext)
                 ###要修改 是否需要删除
+                if needreboot == True and g_model == "Y":
+                    resetcmd = 'reset card {}'.format(rowData.get('solt id'))
+                    print('reset cmd={}'.format(resetcmd))
+                    resetret = net_connect.send_command(resetcmd)
+                    time.sleep(10)
+                    resulttext = '开始reset板卡'
+                    # text.insert('end', '\n {}'.format(resulttext))
+                    outmsg.outtext(resulttext)
+                    print('after reset card get slot state')
+                    net_connectpack = [net_connect]
+                    resetCard = getslotstate(rowData.get('solt id'), dev_info, net_connectpack)
+                    net_connect = net_connectpack[0]
+                    print('get resetCard={}'.format(resetCard))
+                    resetcount = 0
+                    while resetCard.get('State') != 'working' and resetcount < 360:
+                        time.sleep(3)
+                        resetcount = resetcount + 1
+                        net_connectpack = [net_connect]
+                        resetCard = getslotstate(rowData.get('solt id'), dev_info, net_connectpack)
+                        net_connect = net_connectpack[0]
+                        print('not card state <> working waiting... 3seconds')
+                    print('get working state ={}'.format(resetCard.get('State')))
+                    if resetCard.get('State') != 'working':
+                        resulttext = '板卡{} 状态不是working没有起来需要检查'.format(rowData.get('solt id'))
+                        print(resulttext)
+                        outmsg.resetstatus='状态不是working没有起来需要检查'
+                        outmsg.outtext('状态不是working没有起来需要检查')
+                    else:
+                        resulttext = '上传版本成功，重启板卡成功'
+                        outmsg.resetstatus = resulttext
+                        print('上传版本成功，重启板卡成功')
+                        outmsg.outtext(resulttext)
+
                 '''
                 if needreboot == True and  g_model == "YES":
 
@@ -1687,9 +1127,10 @@ g_runfinished=0
 g_threadnum = 1
 threadnumlist = [1,2,4,6,8,10,12,14,16,18]
 g_model = ""
+g_tftp = False
 def importfile():
     global iplist
-    global gimportcsvfilename, g_total
+    global gimportcsvfilename, g_total,g_tftp
     importcsvfilename = tkinter.filedialog.askopenfilename(title='请选择一个文件', filetypes=[('Excel', '.xls'), \
                                                                                               ])
     gimportcsvfilename = importcsvfilename
@@ -1723,11 +1164,16 @@ def importfile():
 
     workbook = xlrd.open_workbook(importcsvfilename)
     sheet1 = workbook.sheet_by_index(0)
-    ftpsheet = workbook.sheet_by_name('ftp服务器信息')
+    ftpsheet = workbook.sheet_by_name('服务器信息')
     ftpip = str(ftpsheet[1,0].value)
     ftpuser=  str(ftpsheet[1,1].value)
     ftppasswd= str(ftpsheet[1,2].value)
     ftpport = str(ftpsheet[1,3].value)
+    if ftpip != "" and ftpuser == "" and ftppasswd =="":
+        g_tftp = True
+        print("采用tftp方式")
+    else:
+        print("采用ftp方式")
     for ir in range(1, sheet1.nrows):
         rowdata = sheet1.row_values(ir)
         row = [str(int(item)) if isinstance(item , float) else item for item in rowdata]
@@ -1763,6 +1209,7 @@ g_finish = 0
 
 # --noconsole
 def call_back(info):
+    global g_finish
     filename = 'runresult.csv'
     g_finish = g_finish + 1
     print('call_back  info={}'.format(info))
@@ -1794,7 +1241,7 @@ rowkey = ['网元ip', '用户名', '密码', '端口号', 'solt id', 'PowerName'
           'Software版本',
           'FPGA版本', \
           'CPLD版本', \
-          '升级bootrom文件名', '升级Software文件名', '升级FPGA文件名', '升级CPLD文件名' \
+          '升级bootrom文件名', '升级Software文件名', '升级FPGA文件名', '升级CPLD文件名' ,'上传完是否重启Y/N'\
     , 'ftpip', 'ftpuser', 'ftppasswd', 'ftpport']
 
 
@@ -1843,12 +1290,12 @@ def startupgrade():
         return
     now = datetime.datetime.now()
     timestamp = now.strftime("%Y%m%d_%H%M%S")
-    runResultfile = "result{}.csv".format(timestamp)
+    runResultfile = "log\\result{}.csv".format(timestamp)
     with open(runResultfile, 'a', newline='') as wf:
         f_wcsv = csv.writer(wf)
         resultHeadLine = [ ["网元ip" ,"solt id","PowerName","板卡属性","硬件版本","板卡状态" , \
              "升级bootrom文件名","升级Software文件名","升级FPGA文件名","升级CPLD文件名", \
-              "bootrom升级结果",    "Software升级结果",    "FPGA升级结果",    "CPLD升级结果"]]
+              "bootrom升级结果",    "Software升级结果",    "FPGA升级结果",    "CPLD升级结果","reset结果"]]
         f_wcsv.writerows(resultHeadLine)
 
 
@@ -1870,13 +1317,16 @@ def startupgrade():
 
     print('设备个数={}'.format(len(netSet)))
     threadnum =   threadnumlist[comboxlist.current()]
+    '''
     modellist = ["NO","YES"]
     g_model = modellist[modelcomboxlist.current()]
     print("选择模式是{}".format(g_model))
     print("选择的线程数{}".format(threadnum))
+     '''
     run_labelvalue.set("开始运行")
     g_runfinished = 0
     import_button.configure(state="disabled")
+    export_button.configure(state="disabled")
     for k,v in deviceIpinfo.items():
         print("kkk={} vvv={}".format(k,v))
         devqueue.put(v)
@@ -2130,7 +1580,7 @@ def helpthread(win,text,q):
                           content.cardinfo["板卡属性"],content.cardinfo["硬件版本"],\
                          content.cardinfo["板卡状态"],content.cardinfo["升级bootrom文件名"],content.cardinfo["升级Software文件名"],\
                          content.cardinfo["升级FPGA文件名"],content.cardinfo["升级CPLD文件名"],\
-                          content.cardbootromRes  ,content.cardsoftwareRes  ,content.cardfpgaRes  ,content.cardcpldRes  ]]
+                          content.cardbootromRes  ,content.cardsoftwareRes  ,content.cardfpgaRes  ,content.cardcpldRes ,content.resetstatus]]
                 f_wcsv.writerows(retlist)
                 g_runfinished = g_runfinished + 1
                 runtext = "运行中{}/{}".format(g_runfinished,g_total)
@@ -2144,8 +1594,8 @@ def helpthread(win,text,q):
         text.insert('end', '\n {}'.format(content))
     '''
     if g_running == True and threading.active_count() == 1:
-        text.insert('end', '\n 升级任务完成')
-        run_labelvalue.set('升级任务完成')
+        text.insert('end', '\n 任务完成结果查看log目录下文件:{}'.format(runResultfile))
+        run_labelvalue.set('任务完成')
         g_running = False
 
     win.after(1000,helpthread,win,text,q)
@@ -2180,7 +1630,7 @@ if __name__ == '__main__':
     comboxlist.current(0)
     comboxlist.pack()
     comboxlist.place(x=280,y=20)
-
+    ''' 
     model_label = tkinter.Label(win, text="每个版本上传后是否自动重启", bg='skyblue')
     model_label.pack()
     model_label.place(x=330, y=20)
@@ -2191,7 +1641,7 @@ if __name__ == '__main__':
     modelcomboxlist.current(0)
     modelcomboxlist.pack()
     modelcomboxlist.place(x=500,y=20)
-
+    '''
     run_labelvalue = tkinter.StringVar()
     run_labelvalue.set('运行状态')
     run_label = tkinter.Label(win, text="运行状态", bg='skyblue',textvariable=run_labelvalue )

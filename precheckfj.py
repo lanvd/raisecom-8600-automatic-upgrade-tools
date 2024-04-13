@@ -16,7 +16,11 @@ import chardet
 import textfsm
 import xlrd
 import xlwt
-logging.basicConfig(filename='dclog.log',level=logging.DEBUG,format='%(asctime)s %(filename)s[line:%(lineno)d] %(message)s',datefmt='%Y-%m-%d %X')
+
+folder_path = './log'
+if not os.path.exists(folder_path):
+    os.makedirs(folder_path)
+logging.basicConfig(filename='log\\dclog.log',level=logging.DEBUG,format='%(asctime)s %(filename)s[line:%(lineno)d] %(message)s',datefmt='%Y-%m-%d %X')
 g_devicelist = list()
 g_devicelistheadline = ["网元ip","用户名","密码","端口号"]
 msgqueue = queue.Queue()
@@ -299,6 +303,20 @@ def getAllVersion(strInfo):
         finally:
             verList.append(result)
     #print(verList)
+
+    with open('template/hardVersion.template') as template:
+        fsm = textfsm.TextFSM(template)
+        try:
+            result = fsm.ParseText(strInfo)
+            result = result[0][0]
+        #print(fsm.header)
+        #print(result)
+        except Exception as ex:
+            result = 'None'
+        finally:
+            verList.append(result)
+
+
     logging.debug(verList)
     return verList
 def getBusiNode(argList):
@@ -322,7 +340,7 @@ def task(neInfo):
         'username': str(username),
         'password':  str(passwd),
         'secret': str(passwd),
-        'session_log': 'netmiko.log',
+        'session_log': 'log\\netmiko.log',
         'port': int(port)
     }
     print('dev_info={}'.format(dev_info))
@@ -377,7 +395,7 @@ def task(neInfo):
         retRow.append(backSlotId)
         retRow.append(backNode['PowerName'])
         retRow.append('主控备板')
-        retRow.append(hardVersion)
+        retRow.append(backDetail[4])
         retRow.append(backNode['State'])
         retRow.append(backDetail[1])
         retRow.append(backDetail[2])
@@ -402,7 +420,7 @@ def task(neInfo):
         retRow.append(masterSoltId)
         retRow.append(masterNode['PowerName'])
         retRow.append('主控板')
-        retRow.append(hardVersion)
+        retRow.append(masterDetail[4])
         retRow.append(masterNode['State'])
         retRow.append(masterDetail[1])
         retRow.append(masterDetail[2])
@@ -432,7 +450,7 @@ def task(neInfo):
             retRow.append(soltId)
             retRow.append(powerName)
             retRow.append('业务板')
-            retRow.append(hardVersion)
+            retRow.append(inodeInfoDetail[4])
             retRow.append(idataInfo['State'])
             retRow.append(inodeInfoDetail[1])
             retRow.append(inodeInfoDetail[2])
@@ -475,7 +493,7 @@ def call_back(info):
 
         headLine = ['网元ip', '用户名', '密码', '端口号', 'solt id', 'PowerName', '板卡属性', '硬件版本', '板卡状态',
                     'bootrom版本', 'Software版本', 'FPGA版本', \
-                    'CPLD版本', '升级bootrom文件名', '升级Software文件名', '升级FPGA文件名', '升级CPLD文件名' ]
+                    'CPLD版本', '升级bootrom文件名', '升级Software文件名', '升级FPGA文件名', '升级CPLD文件名','上传完是否重启Y/N' ]
 
         for i in range(len(headLine)):
             table.write(0, i, headLine[i])
@@ -488,11 +506,11 @@ def call_back(info):
                     table.write(startLine, icol, devInfo[irow][icol])
                 startLine = startLine + 1
 
-        ftptable = wk.add_sheet('ftp服务器信息')
-        ftptable.write(0, 0, 'ftpip')
-        ftptable.write(0, 1, 'ftpuser')
-        ftptable.write(0, 2, 'ftppasswd')
-        ftptable.write(0, 3, 'ftpport')
+        ftptable = wk.add_sheet('服务器信息')
+        ftptable.write(0, 0, 'serverip')
+        ftptable.write(0, 1, 'user(tftp不填)')
+        ftptable.write(0, 2, 'password(tftp不填)')
+        ftptable.write(0, 3, 'port(tftp不填)')
         wk.save(filename)
 
         tkinter.messagebox.showinfo(title="提示", message="网元板卡信息获取完毕")
@@ -528,14 +546,14 @@ def buildimport():
     table = wk.add_sheet('设备列表清单')
     headLine = ['网元ip', '用户名', '密码', '端口号', 'solt id', 'PowerName', '板卡属性', '硬件版本', '板卡状态',
                 'bootrom版本', 'Software版本', 'FPGA版本', \
-                'CPLD版本', '升级bootrom文件名', '升级Software文件名', '升级FPGA文件名', '升级CPLD文件名'  ]
+                'CPLD版本', '升级bootrom文件名', '升级Software文件名', '升级FPGA文件名', '升级CPLD文件名' ,'上传完是否重启Y/N' ]
     for i in range(len(headLine)):
         table.write(0, i, headLine[i])
-    ftptable = wk.add_sheet('ftp服务器信息')
-    ftptable.write(0,0,'ftpip')
-    ftptable.write(0, 1, 'ftpuser')
-    ftptable.write(0, 2, 'ftppasswd')
-    ftptable.write(0, 3, 'ftpport')
+    ftptable = wk.add_sheet('服务器信息')
+    ftptable.write(0,0,'serverip')
+    ftptable.write(0, 1, 'user(tftp不填)')
+    ftptable.write(0, 2, 'password(tftp不填)')
+    ftptable.write(0, 3, 'port(tftp不填)')
     wk.save(outfilename)
 
     tkinter.messagebox.showinfo(title="提示", message="生成导入模板文件import_model.xls")
